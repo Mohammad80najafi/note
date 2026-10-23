@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* eslint-disable @typescript-eslint/no-require-imports */
 /**
  * Cross-platform production start (Windows / macOS / Linux).
  * Sets NODE_ENV=production and launches the Next.js standalone

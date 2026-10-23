@@ -7,9 +7,9 @@
 
 import { api } from './api';
 import type { Block, Page } from './types';
-import { dayLong, otherCalShort, type Primary } from './jalali';
+import { dayLong, otherCalShort, jalaliOf, type Primary } from './jalali';
 
-export type BackupFormat = 'pdf' | 'md' | 'json';
+export type BackupFormat = 'pdf' | 'md' | 'json' | 'zip';
 
 export interface ExportNote {
   page: Page;
@@ -267,6 +267,133 @@ function blockToMarkdown(b: Block): string {
   }
 }
 
+/* ---------------- ZIP folder backup (one folder per day, one .md per note) ---------------- */
+
+/** Filesystem-safe name: strips Windows-forbidden chars, trims, caps length. */
+function fsSafeName(s: string, fallback: string): string {
+  const cleaned = s
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[. ]+$/, '');
+  const cut = cleaned.length > 80 ? cleaned.slice(0, 80).trim() : cleaned;
+  return cut || fallback;
+}
+
+/** Jalali YYYY-MM-DD (Latin digits, sortable) for day folder names. */
+function jalaliFolder(iso: string): string {
+  const { jy, jm, jd } = jalaliOf(iso);
+  return `${jy}-${String(jm).padStart(2, '0')}-${String(jd).padStart(2, '0')}`;
+}
+
+/** One note → one standalone Markdown file (title, dated header, blocks). */
+function noteToFile(
+  page: Page,
+  blocks: Block[],
+  iso: string,
+  lang: 'fa' | 'en',
+  primary: Primary,
+): string {
+  const title = page.title || (lang === 'fa' ? 'بدون عنوان' : 'Untitled');
+  const lines: string[] = [];
+  lines.push(`# ${page.icon ? page.icon + ' ' : ''}${title}`.trimEnd());
+  lines.push('');
+  lines.push(`> ${dayLong(iso, lang, primary)} · ${otherCalShort(iso, lang, primary)}`);
+  lines.push('');
+  let had = false;
+  for (const b of blocks) {
+    const line = blockToMarkdown(b);
+    if (line) {
+      lines.push(line);
+      lines.push('');
+      had = true;
+    }
+  }
+  if (!had) {
+    lines.push(lang === 'fa' ? '_خالی_' : '_Empty_');
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+async function exportZipBackup(
+  days: string[],
+  notes: ExportNote[],
+  lang: 'fa' | 'en',
+  primary: Primary,
+): Promise<ExportResult> {
+  const ds = [...days].sort();
+  const byDay = new Map<string, ExportNote[]>();
+  for (const n of notes) {
+    const key = n.page.date || '';
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key)!.push(n);
+  }
+
+  const dayFolder = (iso: string) =>
+    primary === 'gregorian' ? iso : jalaliFolder(iso);
+
+  const root = fsSafeName(
+    ds.length === 1
+      ? lang === 'fa'
+        ? `پشتیبان ${dayFolder(ds[0])}`
+        : `backup-${dayFolder(ds[0])}`
+      : lang === 'fa'
+        ? `پشتیبان ${dayFolder(ds[0])} تا ${dayFolder(ds[ds.length - 1])}`
+        : `backup-${dayFolder(ds[0])}-to-${dayFolder(ds[ds.length - 1])}`,
+    'notion-backup',
+  );
+
+  const files: { path: string; content: string }[] = [];
+  const indexLines: string[] = [lang === 'fa' ? '# پشتیبان یادداشت‌ها' : '# Notes Backup', ''];
+  indexLines.push(
+    lang === 'fa'
+      ? `بازه: \`${ds[0]}\` تا \`${ds[ds.length - 1]}\``
+      : `Range: \`${ds[0]}\` → \`${ds[ds.length - 1]}\``,
+  );
+  indexLines.push('');
+
+  for (const iso of ds) {
+    const list = byDay.get(iso) || [];
+    if (!list.length) continue;
+    const folder = dayFolder(iso);
+    indexLines.push(
+      `- \`${folder}/\` — ${list.length} ${lang === 'fa' ? (list.length === 1 ? 'یادداشت' : 'یادداشت') : list.length === 1 ? 'note' : 'notes'}`,
+    );
+    const used = new Map<string, number>();
+    for (const { page, blocks } of list) {
+      const base = fsSafeName(
+        page.title || (lang === 'fa' ? 'بی‌عنوان' : 'Untitled'),
+        lang === 'fa' ? 'بی‌عنوان' : 'Untitled',
+      );
+      const n = (used.get(base) || 0) + 1;
+      used.set(base, n);
+      const fname = n === 1 ? `${base}.md` : `${base} (${n}).md`;
+      files.push({
+        path: `${root}/${folder}/${fname}`,
+        content: noteToFile(page, blocks, iso, lang, primary),
+      });
+    }
+  }
+  files.push({
+    path: `${root}/${lang === 'fa' ? 'فهرست' : 'index'}.md`,
+    content: indexLines.join('\n'),
+  });
+
+  const name = backupFileName(days, 'zip');
+  const { url: relay } = await api.createZipExport({ filename: name, files });
+  const sep = relay.includes('?') ? '&' : '?';
+  const url = `${relay}${sep}XTransformPort=3030`;
+  // same-origin relay with Content-Disposition → a real, reliable download
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  return { count: notes.length, url, popupBlocked: false };
+}
+
 /* ---------------- the three exports ---------------- */
 
 export async function exportBackup(
@@ -277,6 +404,8 @@ export async function exportBackup(
 ): Promise<ExportResult> {
   const notes = await collectNotes(days);
   if (notes.length === 0) return { count: 0, url: null, popupBlocked: false };
+
+  if (format === 'zip') return exportZipBackup(days, notes, lang, primary);
 
   if (format === 'json') {
     const payload = {

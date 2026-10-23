@@ -7,6 +7,7 @@ import {
   Check,
   FileJson,
   FileText,
+  FolderDown,
   Printer,
   X,
   CalendarRange,
@@ -292,12 +293,17 @@ export function BackupDialog(props: BackupDialogProps) {
               <FileJson size={13} style={{ verticalAlign: '-2px', marginInlineEnd: 4 }} />
               {t('backup.fmtJson')}
             </button>
+            <button className={`bk-seg-btn ${format === 'zip' ? 'on' : ''}`} onClick={() => setFormat('zip')} title={t('backup.zipHint')}>
+              <FolderDown size={13} style={{ verticalAlign: '-2px', marginInlineEnd: 4 }} />
+              {t('backup.fmtZip')}
+            </button>
           </div>
           <button className="bk-export-btn" disabled={!days.length || busy} onClick={doExport}>
             {busy ? t('backup.exporting') : t('backup.export')}
           </button>
         </div>
         {format === 'pdf' && <div className="bk-pdf-hint">{t('backup.pdfHint')}</div>}
+        {format === 'zip' && <div className="bk-pdf-hint">{t('backup.zipHint')}</div>}
 
         {/* status + download fallback */}
         {failed && <div className="bk-error">{failed === 'session' ? t('backup.sessionLost') : t('backup.exportFailed')}</div>}

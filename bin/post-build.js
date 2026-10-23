@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* eslint-disable @typescript-eslint/no-require-imports */
 /**
  * Cross-platform production build (Windows / macOS / Linux).
  * Runs `next build`, then copies static assets into the standalone

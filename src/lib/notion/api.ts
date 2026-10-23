@@ -95,6 +95,10 @@ export const api = {
   createExport: (b: { filename: string; mime: string; content: string }) =>
     req<{ id: string; url: string }>('/api/export', json('POST', b)),
 
+  /** Upload a foldered backup manifest; the server zips it (one folder per day, one .md per note). */
+  createZipExport: (b: { filename: string; files: { path: string; content: string }[] }) =>
+    req<{ id: string; url: string }>('/api/export-zip', json('POST', b)),
+
   /* ---- site-wide lock ---- */
 
   lockStatus: () => req<LockStatus>('/api/lock'),

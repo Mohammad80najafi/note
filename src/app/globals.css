@@ -914,6 +914,7 @@ html, body {
 .bk-seg {
   display: flex; gap: 2px; padding: 2px;
   background: var(--hover); border-radius: 7px;
+  flex-wrap: wrap;
 }
 .bk-seg-btn {
   border: none; background: transparent; cursor: pointer; font-family: inherit;

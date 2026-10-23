@@ -934,6 +934,156 @@ async fn create_export(State(db): State<Db>, Json(body): Json<ExportBody>) -> Re
     Json(json!({ "id": id, "url": format!("/api/export/{}", id) })).into_response()
 }
 
+// ---------------- foldered ZIP backup (one folder per day, one file per note) ----------------
+
+#[derive(Deserialize)]
+struct ZipFileEntry {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct ZipBody {
+    filename: String,
+    files: Vec<ZipFileEntry>,
+}
+
+/// CRC-32 (IEEE 802.3), table-based — needed for the ZIP local headers.
+fn crc32(data: &[u8]) -> u32 {
+    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut t = [0u32; 256];
+        let mut i = 0usize;
+        while i < 256 {
+            let mut c = i as u32;
+            let mut k = 0;
+            while k < 8 {
+                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                k += 1;
+            }
+            t[i] = c;
+            i += 1;
+        }
+        t
+    });
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    !crc
+}
+
+fn push_u16(v: &mut Vec<u8>, x: u16) {
+    v.extend_from_slice(&x.to_le_bytes());
+}
+fn push_u32(v: &mut Vec<u8>, x: u32) {
+    v.extend_from_slice(&x.to_le_bytes());
+}
+
+/// Minimal ZIP writer — "stored" (no compression), UTF-8 file names
+/// (general-purpose flag bit 11) so Persian folder/file names survive
+/// Windows Explorer, 7-zip and macOS unarchiver alike.
+fn build_zip(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    const DOS_TIME: u16 = 0; // 00:00:00
+    const DOS_DATE: u16 = 0x5821; // 2024-01-01 (a valid DOS date)
+    let mut out: Vec<u8> = Vec::new();
+    let mut central: Vec<u8> = Vec::new();
+    let mut count: u16 = 0;
+
+    for (name, data) in files {
+        let offset = out.len() as u32;
+        let crc = crc32(data);
+        let nb = name.as_bytes();
+
+        // local file header
+        push_u32(&mut out, 0x0403_4b50);
+        push_u16(&mut out, 20); // version needed
+        push_u16(&mut out, 0x0800); // flags: UTF-8 names
+        push_u16(&mut out, 0); // method: stored
+        push_u16(&mut out, DOS_TIME);
+        push_u16(&mut out, DOS_DATE);
+        push_u32(&mut out, crc);
+        push_u32(&mut out, data.len() as u32);
+        push_u32(&mut out, data.len() as u32);
+        push_u16(&mut out, nb.len() as u16);
+        push_u16(&mut out, 0); // extra len
+        out.extend_from_slice(nb);
+        out.extend_from_slice(data);
+
+        // central directory entry
+        push_u32(&mut central, 0x0201_4b50);
+        push_u16(&mut central, 20); // version made by
+        push_u16(&mut central, 20); // version needed
+        push_u16(&mut central, 0x0800);
+        push_u16(&mut central, 0);
+        push_u16(&mut central, DOS_TIME);
+        push_u16(&mut central, DOS_DATE);
+        push_u32(&mut central, crc);
+        push_u32(&mut central, data.len() as u32);
+        push_u32(&mut central, data.len() as u32);
+        push_u16(&mut central, nb.len() as u16);
+        push_u16(&mut central, 0); // extra
+        push_u16(&mut central, 0); // comment
+        push_u16(&mut central, 0); // disk number
+        push_u16(&mut central, 0); // internal attrs
+        push_u32(&mut central, 0); // external attrs
+        push_u32(&mut central, offset);
+        central.extend_from_slice(nb);
+        count += 1;
+    }
+
+    let cd_offset = out.len() as u32;
+    let cd_size = central.len() as u32;
+    out.extend_from_slice(&central);
+
+    // end of central directory
+    push_u32(&mut out, 0x0605_4b50);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, 0);
+    push_u16(&mut out, count);
+    push_u16(&mut out, count);
+    push_u32(&mut out, cd_size);
+    push_u32(&mut out, cd_offset);
+    push_u16(&mut out, 0);
+    out
+}
+
+async fn create_export_zip(State(db): State<Db>, Json(body): Json<ZipBody>) -> Response {
+    let _ = db; // state kept for symmetry
+    if body.files.is_empty() || body.files.len() > 2000 {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"bad files"}))).into_response();
+    }
+    let total: usize = body.files.iter().map(|f| f.content.len()).sum();
+    if total > 64 * 1024 * 1024 {
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({"error":"too large"}))).into_response();
+    }
+
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(body.files.len());
+    for f in &body.files {
+        let p = f.path.trim().trim_start_matches('/');
+        // keep it a clean relative path: no traversal, no absolute/drive paths
+        if p.is_empty() || p.contains("..") || p.contains('\\') || p.contains(':') {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error":"bad path"}))).into_response();
+        }
+        entries.push((p.to_string(), f.content.as_bytes().to_vec()));
+    }
+
+    let bytes = build_zip(&entries);
+
+    let dir = exports_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    prune_exports(&dir);
+    let id = Uuid::new_v4().simple().to_string();
+    let name = safe_component(&body.filename, "backup.zip");
+    if std::fs::write(dir.join(format!("{id}.bin")), &bytes).is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"write failed"}))).into_response();
+    }
+    let _ = std::fs::write(dir.join(format!("{id}.mime")), "application/zip");
+    let _ = std::fs::write(dir.join(format!("{id}.name")), name);
+
+    Json(json!({ "id": id, "url": format!("/api/export/{}", id) })).into_response()
+}
+
 async fn serve_export(
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
@@ -1003,6 +1153,7 @@ async fn main() {
         .route("/api/lock/engage", post(lock_engage))
         .route("/api/lock/disable", post(lock_disable))
         .route("/api/export", post(create_export))
+        .route("/api/export-zip", post(create_export_zip))
         .route("/api/export/{id}", get(serve_export))
         .layer(axum::extract::DefaultBodyLimit::max(70 * 1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(db.clone(), lock_guard))
