@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "node bin/post-build.js",
+    "build:app": "node bin/build-app.js",
     "start": "node bin/prod-start.js",
     "lint": "eslint .",
     "db:push": "prisma db push --accept-data-loss",

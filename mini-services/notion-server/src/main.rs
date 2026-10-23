@@ -332,7 +332,9 @@ async fn lock_guard(State(db): State<Db>, req: Request, next: Next) -> Response 
         let con = db.lock().unwrap();
         lock_state(&con)
     };
-    if st.enabled {
+    // Only data endpoints are guarded — the static UI itself must always
+    // load (single-port app mode) so the lock screen can be shown.
+    if st.enabled && path.starts_with("/api/") {
         let public = (path == "/api/lock" && method == "GET")
             || (path == "/api/lock/verify" && method == "POST")
             || (path == "/api/lock/engage" && method == "POST");
@@ -1155,6 +1157,7 @@ async fn main() {
         .route("/api/export", post(create_export))
         .route("/api/export-zip", post(create_export_zip))
         .route("/api/export/{id}", get(serve_export))
+        .fallback(static_fallback)
         .layer(axum::extract::DefaultBodyLimit::max(70 * 1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(db.clone(), lock_guard))
         .with_state(db);
@@ -1166,10 +1169,138 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .expect("bind failed");
+    let url = format!("http://127.0.0.1:{}", port);
     println!("notion-server (Rust/Axum) listening on 0.0.0.0:{}", port);
+    if static_dir().is_some() {
+        println!("  app: {}  (UI served from static folder)", url);
+        if std::env::var("NOTION_SERVE_HINT").ok().as_deref() != Some("0") {
+            println!("  phone/tablet on the same Wi-Fi: http://<this-pc-ip>:{}  (then Add to Home Screen)", port);
+        }
+    }
+    open_browser(&url);
     axum::serve(listener, app).await.unwrap();
 }
 
 // silence unused import warning for Block type used implicitly through json
 #[allow(dead_code)]
 fn _t(_: Block) {}
+
+/* ================================================================
+   Static UI — Windows-app mode. The same server that answers /api
+   also serves the exported frontend (out/), so the whole app is a
+   single executable + a static folder. No Node needed at runtime.
+   ================================================================ */
+
+/// Where the static UI lives. Priority:
+///   1. NOTE_STATIC env override
+///   2. <exe folder>/static          (packaged portable app)
+///   3. <crate>/../../out            (`npm run build:app` inside the project)
+fn static_dir() -> Option<std::path::PathBuf> {
+    if let Ok(d) = std::env::var("NOTE_STATIC") {
+        let p = std::path::PathBuf::from(d);
+        if p.join("index.html").is_file() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let p = parent.join("static");
+            if p.join("index.html").is_file() {
+                return Some(p);
+            }
+        }
+    }
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out");
+    if p.join("index.html").is_file() {
+        return Some(p);
+    }
+    None
+}
+
+fn mime_of(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    match ext {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" | "webmanifest" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "txt" | "md" => "text/plain; charset=utf-8",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "map" => "application/json; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Fallback for every non-API path: serve the static file, or index.html
+/// (single-page app), or a friendly hint when the UI was never exported.
+async fn static_fallback(req: Request) -> Response {
+    use std::io::Read;
+    let path = req.uri().path().trim_start_matches('/').to_string();
+    let Some(dir) = static_dir() else {
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            "<!doctype html><meta charset=\"utf-8\"><body style=\"font-family:sans-serif;padding:40px\">\
+             <h2>UI not built yet</h2><p>Run <code>npm run build:app</code> once, then restart the server.</p>",
+        )
+            .into_response();
+    };
+    // reject traversal
+    if path.contains("..") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let mut file = dir.join(&path);
+    let mut served = path.clone();
+    if path.is_empty() || !file.is_file() {
+        file = dir.join("index.html"); // SPA fallback
+        served = "index.html".to_string();
+    }
+    match std::fs::File::open(&file) {
+        Ok(mut f) => {
+            let mut buf = Vec::new();
+            let _ = f.read_to_end(&mut buf);
+            let mime = mime_of(&served);
+            let cache = if mime.starts_with("text/html") {
+                "no-store"
+            } else {
+                "public, max-age=3600"
+            };
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, mime.to_string()),
+                    (header::CACHE_CONTROL, cache.to_string()),
+                ],
+                buf,
+            )
+                .into_response()
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Open the default browser once the server is listening (app experience).
+/// Opt out with NO_OPEN=1.
+fn open_browser(url: &str) {
+    if std::env::var("NO_OPEN").ok().as_deref() == Some("1") {
+        return;
+    }
+    let r = if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(url).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    };
+    let _ = r; // headless/CI boxes have no browser — ignore quietly
+}

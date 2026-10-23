@@ -4,7 +4,15 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "My Notion",
   description: "A faithful Notion clone — Rust (Axum + SQLite) backend with a Next.js frontend.",
-  icons: { icon: "https://em-content.zobj.net/source/apple/391/memo_1f4dd.png" },
+  manifest: "/manifest.json",
+  icons: {
+    icon: [
+      { url: "/favicon-32.png", sizes: "32x32", type: "image/png" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+    ],
+    apple: "/apple-touch-icon.png",
+  },
+  appleWebApp: { capable: true, statusBarStyle: "default", title: "نوت من" },
 };
 
 export const viewport: Viewport = {
@@ -30,6 +38,12 @@ export default function RootLayout({
           precedence="default"
         />
         {children}
+        {/* Installable-app (PWA) service worker — skipped in `next dev` (port 3000) */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `if('serviceWorker' in navigator&&location.port!=='3000'){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){})})}`,
+          }}
+        />
       </body>
     </html>
   );
