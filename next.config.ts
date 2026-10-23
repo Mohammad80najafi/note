@@ -7,6 +7,16 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
+  /* Proxy API calls to the Rust backend so the app runs locally
+     without the Caddy gateway (no XTransformPort needed). */
+  async rewrites() {
+    return [
+      {
+        source: "/api/:path*",
+        destination: "http://localhost:3030/api/:path*",
+      },
+    ];
+  },
 };
 
 export default nextConfig;
