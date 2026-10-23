@@ -155,10 +155,8 @@ export function BackupDialog(props: BackupDialogProps) {
         setBusy(false);
         return;
       }
-      if (r.url) {
-        setFallback({ url: r.url + (format === 'pdf' ? '&inline=1' : ''), kind: format === 'pdf' ? 'print' : 'download' });
-      }
-      await new Promise((res) => setTimeout(res, format === 'pdf' ? 400 : 150)); // let the print tab open
+      if (r.url) setFallback({ url: r.url, kind: r.kind });
+      await new Promise((res) => setTimeout(res, 150)); // let the download start
       onExported(days, format, r.count);
     } catch (e) {
       setFailed(isLockedErr(e) ? 'session' : 'generic');

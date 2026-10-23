@@ -1,8 +1,10 @@
 /* ================================================================
    Backup export — the user selects days (single day or a range),
    we export exactly the notes attached to those days.
-   Formats: JSON (data), Markdown (text), PDF (via browser print —
-   perfect Persian/RTL shaping, "Save as PDF" in the print dialog).
+   Formats: JSON (data), Markdown (text), ZIP (one folder per day,
+   one .md file per note), PDF (one folder per day, one print-ready
+   file per note + a combined file — open → print dialog → "Save as
+   PDF"; perfect Persian/RTL shaping via the browser).
    ================================================================ */
 
 import { api } from './api';
@@ -62,10 +64,10 @@ function metaOf(b: Block): Record<string, unknown> {
   }
 }
 
-export function backupFileName(days: string[], ext: string): string {
+export function backupFileName(days: string[], ext: string, prefix = 'notion-backup'): string {
   const ds = [...days].sort();
   const span = ds.length === 1 ? ds[0] : `${ds[0]}_${ds[ds.length - 1]}`;
-  return `notion-backup_${span}.${ext}`;
+  return `${prefix}_${span}.${ext}`;
 }
 
 function download(filename: string, mime: string, data: string): void {
@@ -101,12 +103,23 @@ export interface ExportResult {
   count: number;
   /** Same-origin fallback URL (download / print page); null if the relay failed. */
   url: string | null;
-  /** PDF: true when the print tab was blocked by a popup blocker. */
+  /** Kept for compatibility; always false since the print-tab flow is gone. */
   popupBlocked: boolean;
+  /** How the fallback link behaves: direct download or inline print page. */
+  kind: 'download' | 'print';
+}
+
+/** App origin at build time — so exported files opened from disk can still load /api images. */
+function pageOrigin(): string {
+  try {
+    return typeof window !== 'undefined' ? window.location.origin : '';
+  } catch {
+    return '';
+  }
 }
 
 /** Editor block → simple print HTML (content already carries safe inline tags). */
-function blockToHtml(b: Block): string {
+function blockToHtml(b: Block, origin: string): string {
   const c = b.content;
   switch (b.type) {
     case 'heading_1': return `<h1>${c}</h1>`;
@@ -125,71 +138,20 @@ function blockToHtml(b: Block): string {
     case 'divider': return '<hr/>';
     case 'image': {
       const src = String(metaOf(b).src || metaOf(b).url || '');
-      return src ? `<img src="${escapeHtml(src)}"/>` : '';
+      if (!src) return '';
+      // Relative /api/... URLs must become absolute, or they break when the
+      // exported file is opened straight from disk (file://).
+      const abs = /^(https?:|data:|blob:)/i.test(src) ? src : `${origin}${src.startsWith('/') ? '' : '/'}${src}`;
+      return `<img src="${escapeHtml(abs)}"/>`;
     }
     case 'toggle': return c ? `<p>${c}</p>` : '';
     default: return c ? `<p>${c}</p>` : '';
   }
 }
 
-/* ---------------- PDF (new-tab print page) ---------------- */
-
-/** Standalone, print-ready document: day sections → note cards → blocks. RTL-aware. */
-export function buildExportHtml(
-  days: string[],
-  notes: ExportNote[],
-  lang: 'fa' | 'en',
-  primary: Primary,
-): string {
-  const ds = [...days].sort();
-  const byDay = new Map<string, ExportNote[]>();
-  for (const n of notes) {
-    const key = n.page.date || '';
-    if (!byDay.has(key)) byDay.set(key, []);
-    byDay.get(key)!.push(n);
-  }
-
-  const sections = ds
-    .map((iso) => {
-      const list = byDay.get(iso) || [];
-      const cards = list
-        .map(({ page, blocks }) => {
-          const body = blocks.map(blockToHtml).join('\n');
-          return `
-          <section class="note">
-            <div class="note-head">
-              <span class="note-ico">${page.icon || '📄'}</span>
-              <span class="note-title">${escapeHtml(page.title || (lang === 'fa' ? 'بدون عنوان' : 'Untitled'))}</span>
-              <span class="note-date">${otherCalShort(iso, lang, primary)}</span>
-            </div>
-            <div class="note-body">${body || (lang === 'fa' ? '<p class="empty">خالی</p>' : '<p class="empty">Empty</p>')}</div>
-          </section>`;
-        })
-        .join('\n');
-      return `
-        <div class="day">
-          <div class="day-title">${dayLong(iso, lang, primary)}</div>
-          <div class="day-sub">${otherCalShort(iso, lang, primary)} · ${list.length} ${lang === 'fa' ? 'یادداشت' : list.length === 1 ? 'note' : 'notes'}</div>
-          ${cards || (lang === 'fa' ? '<div class="day-empty">بدون یادداشت</div>' : '<div class="day-empty">No notes</div>')}
-        </div>`;
-    })
-    .join('\n');
-
-  const generated =
-    lang === 'fa'
-      ? new Date().toLocaleDateString('fa-IR', { year: 'numeric', month: 'long', day: 'numeric' })
-      : new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-  const coverRange =
-    ds.length === 1 ? dayLong(ds[0], lang, primary) : `${dayLong(ds[0], lang, primary)} — ${dayLong(ds[ds.length - 1], lang, primary)}`;
-
-  return `<!doctype html>
-<html lang="${lang}" dir="${lang === 'fa' ? 'rtl' : 'ltr'}">
-<head>
-<meta charset="utf-8"/>
-<title>Notion Backup — ${escapeHtml(coverRange)}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700&display=swap" rel="stylesheet"/>
-<style>
+/** Shared print CSS for every exported document (cover, note cards, blocks). */
+function printCss(lang: 'fa' | 'en'): string {
+  return `
   * { box-sizing: border-box; }
   body {
     font-family: ${lang === 'fa' ? "'Vazirmatn', Tahoma" : 'Helvetica, Arial'}, sans-serif;
@@ -229,18 +191,114 @@ export function buildExportHtml(
   .note-body hr { border: none; border-top: 1px solid rgba(55,53,47,.15); margin: 8px 0; }
   .note-body img { max-width: 100%; }
   .empty { color: rgba(55,53,47,.4); font-style: italic; }
-  @page { margin: 16mm 14mm; }
+  @page { margin: 16mm 14mm; }`;
+}
+
+function htmlShell(head: { lang: 'fa' | 'en'; title: string }, body: string, css: string): string {
+  const { lang, title } = head;
+  return `<!doctype html>
+<html lang="${lang}" dir="${lang === 'fa' ? 'rtl' : 'ltr'}">
+<head>
+<meta charset="utf-8"/>
+<title>${escapeHtml(title)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;700&display=swap" rel="stylesheet"/>
+<style>${css}
 </style>
 </head>
 <body>
+${body}
+</body>
+</html>`;
+}
+
+/** Auto-fire the browser print dialog once the document has settled. */
+function autoPrintScript(): string {
+  return `<script>window.addEventListener('load',function(){setTimeout(function(){try{window.print()}catch(e){}},250)});</script>`;
+}
+
+/* ---------------- combined print document ---------------- */
+
+/** Standalone, print-ready document: day sections → note cards → blocks. RTL-aware. */
+export function buildExportHtml(
+  days: string[],
+  notes: ExportNote[],
+  lang: 'fa' | 'en',
+  primary: Primary,
+  origin: string = pageOrigin(),
+): string {
+  const ds = [...days].sort();
+  const byDay = new Map<string, ExportNote[]>();
+  for (const n of notes) {
+    const key = n.page.date || '';
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key)!.push(n);
+  }
+
+  const sections = ds
+    .map((iso) => {
+      const list = byDay.get(iso) || [];
+      const cards = list
+        .map(({ page, blocks }) => {
+          const body = blocks.map((b) => blockToHtml(b, origin)).join('\n');
+          return `
+          <section class="note">
+            <div class="note-head">
+              <span class="note-ico">${page.icon || '📄'}</span>
+              <span class="note-title">${escapeHtml(page.title || (lang === 'fa' ? 'بدون عنوان' : 'Untitled'))}</span>
+              <span class="note-date">${otherCalShort(iso, lang, primary)}</span>
+            </div>
+            <div class="note-body">${body || (lang === 'fa' ? '<p class="empty">خالی</p>' : '<p class="empty">Empty</p>')}</div>
+          </section>`;
+        })
+        .join('\n');
+      return `
+        <div class="day">
+          <div class="day-title">${dayLong(iso, lang, primary)}</div>
+          <div class="day-sub">${otherCalShort(iso, lang, primary)} · ${list.length} ${lang === 'fa' ? 'یادداشت' : list.length === 1 ? 'note' : 'notes'}</div>
+          ${cards || (lang === 'fa' ? '<div class="day-empty">بدون یادداشت</div>' : '<div class="day-empty">No notes</div>')}
+        </div>`;
+    })
+    .join('\n');
+
+  const generated =
+    lang === 'fa'
+      ? new Date().toLocaleDateString('fa-IR', { year: 'numeric', month: 'long', day: 'numeric' })
+      : new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const coverRange =
+    ds.length === 1 ? dayLong(ds[0], lang, primary) : `${dayLong(ds[0], lang, primary)} — ${dayLong(ds[ds.length - 1], lang, primary)}`;
+
+  const body = `
   <div class="cover">
     <h1>${lang === 'fa' ? 'پشتیبان یادداشت‌ها' : 'Notes Backup'}</h1>
     <div class="range">${escapeHtml(coverRange)}</div>
     <div class="meta">${notes.length} ${lang === 'fa' ? 'یادداشت' : notes.length === 1 ? 'note' : 'notes'} · ${lang === 'fa' ? 'تاریخ تهیه:' : 'Generated:'} ${generated}</div>
   </div>
-  ${sections}
-</body>
-</html>`;
+  ${sections}`;
+  return htmlShell({ lang, title: `Notion Backup — ${coverRange}` }, body, printCss(lang));
+}
+
+/** One note → one standalone print-ready document (its own cover + body). */
+export function buildNoteHtml(
+  page: Page,
+  blocks: Block[],
+  iso: string,
+  lang: 'fa' | 'en',
+  primary: Primary,
+  origin: string = pageOrigin(),
+): string {
+  const title = page.title || (lang === 'fa' ? 'بدون عنوان' : 'Untitled');
+  const body = blocks.map((b) => blockToHtml(b, origin)).join('\n');
+  const doc = `
+  <div class="cover">
+    <h1>${page.icon ? `${escapeHtml(page.icon)} ` : ''}${escapeHtml(title)}</h1>
+    <div class="range">${dayLong(iso, lang, primary)}</div>
+    <div class="meta">${otherCalShort(iso, lang, primary)}</div>
+  </div>
+  <section class="note">
+    <div class="note-body">${body || (lang === 'fa' ? '<p class="empty">خالی</p>' : '<p class="empty">Empty</p>')}</div>
+  </section>`;
+  return htmlShell({ lang, title }, doc, printCss(lang));
 }
 
 /* ---------------- Markdown ---------------- */
@@ -316,6 +374,17 @@ function noteToFile(
   return lines.join('\n');
 }
 
+/** Shared: group notes by their ISO day. */
+function groupByDay(notes: ExportNote[]): Map<string, ExportNote[]> {
+  const byDay = new Map<string, ExportNote[]>();
+  for (const n of notes) {
+    const key = n.page.date || '';
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key)!.push(n);
+  }
+  return byDay;
+}
+
 async function exportZipBackup(
   days: string[],
   notes: ExportNote[],
@@ -323,12 +392,7 @@ async function exportZipBackup(
   primary: Primary,
 ): Promise<ExportResult> {
   const ds = [...days].sort();
-  const byDay = new Map<string, ExportNote[]>();
-  for (const n of notes) {
-    const key = n.page.date || '';
-    if (!byDay.has(key)) byDay.set(key, []);
-    byDay.get(key)!.push(n);
-  }
+  const byDay = groupByDay(notes);
 
   const dayFolder = (iso: string) =>
     primary === 'gregorian' ? iso : jalaliFolder(iso);
@@ -382,16 +446,109 @@ async function exportZipBackup(
 
   const name = backupFileName(days, 'zip');
   const { url: relay } = await api.createZipExport({ filename: name, files });
+  return downloadViaRelay(relay, name, notes.length);
+}
+
+/* ---------------- PDF backup (one folder per day, one print-ready file per note) ----------------
+
+   Same foldered structure as the ZIP backup, but every note is a standalone,
+   print-ready document: open it and the browser print dialog opens
+   automatically → "Save as PDF" → one PDF file per note with perfect
+   Persian/RTL shaping. A combined file for the whole range is included too.
+
+-------------------------------------------------------------------------------- */
+
+async function exportPdfBackup(
+  days: string[],
+  notes: ExportNote[],
+  lang: 'fa' | 'en',
+  primary: Primary,
+): Promise<ExportResult> {
+  const ds = [...days].sort();
+  const byDay = groupByDay(notes);
+  const origin = pageOrigin();
+  const script = autoPrintScript();
+
+  const dayFolder = (iso: string) =>
+    primary === 'gregorian' ? iso : jalaliFolder(iso);
+
+  const root = fsSafeName(
+    ds.length === 1
+      ? lang === 'fa'
+        ? `پشتیبان PDF ${dayFolder(ds[0])}`
+        : `PDF backup ${dayFolder(ds[0])}`
+      : lang === 'fa'
+        ? `پشتیبان PDF ${dayFolder(ds[0])} تا ${dayFolder(ds[ds.length - 1])}`
+        : `PDF backup ${dayFolder(ds[0])} to ${dayFolder(ds[ds.length - 1])}`,
+    'pdf-backup',
+  );
+
+  const files: { path: string; content: string }[] = [];
+  const indexLines: string[] = [lang === 'fa' ? '# پشتیبان PDF یادداشت‌ها' : '# Notes PDF Backup', ''];
+  indexLines.push(
+    lang === 'fa'
+      ? 'هر یادداشت یک فایل HTML آمادهٔ چاپ است؛ فایل را باز کنید و در پنجرهٔ چاپ، مقصد را «Save as PDF» بگذارید. فایل «همه یادداشت ها» هم کل بازه را یکجا چاپ می‌کند.'
+      : 'Each note is a print-ready HTML file — open it and pick "Save as PDF" in the print dialog. The "all notes" file prints the whole range at once.',
+  );
+  indexLines.push('');
+  indexLines.push(
+    lang === 'fa'
+      ? `بازه: \`${ds[0]}\` تا \`${ds[ds.length - 1]}\``
+      : `Range: \`${ds[0]}\` → \`${ds[ds.length - 1]}\``,
+  );
+  indexLines.push('');
+
+  for (const iso of ds) {
+    const list = byDay.get(iso) || [];
+    if (!list.length) continue;
+    const folder = dayFolder(iso);
+    indexLines.push(
+      `- \`${folder}/\` — ${list.length} ${lang === 'fa' ? 'یادداشت' : list.length === 1 ? 'note' : 'notes'}`,
+    );
+    const used = new Map<string, number>();
+    for (const { page, blocks } of list) {
+      const base = fsSafeName(
+        page.title || (lang === 'fa' ? 'بی‌عنوان' : 'Untitled'),
+        lang === 'fa' ? 'بی‌عنوان' : 'Untitled',
+      );
+      const n = (used.get(base) || 0) + 1;
+      used.set(base, n);
+      const fname = n === 1 ? `${base}.html` : `${base} (${n}).html`;
+      const html = buildNoteHtml(page, blocks, iso, lang, primary, origin).replace(
+        '</body>',
+        `${script}\n</body>`,
+      );
+      files.push({ path: `${root}/${folder}/${fname}`, content: html });
+    }
+  }
+
+  // combined document → one PDF for the whole range, if preferred
+  const combinedName = lang === 'fa' ? 'همه یادداشت ها' : 'all-notes';
+  files.push({
+    path: `${root}/${combinedName}.html`,
+    content: buildExportHtml(days, notes, lang, primary, origin).replace('</body>', `${script}\n</body>`),
+  });
+  files.push({
+    path: `${root}/${lang === 'fa' ? 'فهرست' : 'index'}.md`,
+    content: indexLines.join('\n'),
+  });
+
+  const name = backupFileName(days, 'zip', 'notion-pdf-backup');
+  const { url: relay } = await api.createZipExport({ filename: name, files });
+  return downloadViaRelay(relay, name, notes.length);
+}
+
+/** Same-origin relay with Content-Disposition → a real, reliable download. */
+function downloadViaRelay(relay: string, name: string, count: number): ExportResult {
   const sep = relay.includes('?') ? '&' : '?';
   const url = `${relay}${sep}XTransformPort=3030`;
-  // same-origin relay with Content-Disposition → a real, reliable download
   const a = document.createElement('a');
   a.href = url;
   a.download = name;
   document.body.appendChild(a);
   a.click();
   a.remove();
-  return { count: notes.length, url, popupBlocked: false };
+  return { count, url, popupBlocked: false, kind: 'download' };
 }
 
 /* ---------------- the three exports ---------------- */
@@ -403,7 +560,9 @@ export async function exportBackup(
   primary: Primary,
 ): Promise<ExportResult> {
   const notes = await collectNotes(days);
-  if (notes.length === 0) return { count: 0, url: null, popupBlocked: false };
+  if (notes.length === 0) return { count: 0, url: null, popupBlocked: false, kind: 'download' };
+
+  if (format === 'pdf') return exportPdfBackup(days, notes, lang, primary);
 
   if (format === 'zip') return exportZipBackup(days, notes, lang, primary);
 
@@ -420,7 +579,7 @@ export async function exportBackup(
     const name = backupFileName(days, 'json');
     download(name, 'application/json', data);
     const url = await storeOnServer(name, 'application/json', data);
-    return { count: notes.length, url, popupBlocked: false };
+    return { count: notes.length, url, popupBlocked: false, kind: 'download' };
   }
 
   if (format === 'md') {
@@ -461,16 +620,8 @@ export async function exportBackup(
     const name = backupFileName(days, 'md');
     download(name, 'text/markdown', data);
     const url = await storeOnServer(name, 'text/markdown', data);
-    return { count: notes.length, url, popupBlocked: false };
+    return { count: notes.length, url, popupBlocked: false, kind: 'download' };
   }
 
-  // PDF → open the print-ready document as a TOP-LEVEL tab (print() is
-  // ignored inside cross-origin/embedded frames; a real tab always works).
-  const script = `<script>window.addEventListener('load',function(){setTimeout(function(){try{window.print()}catch(e){}},250)});</script>`;
-  const html = buildExportHtml(days, notes, lang, primary).replace('</body>', `${script}\n</body>`);
-  const name = backupFileName(days, 'html');
-  const url = await storeOnServer(name, 'text/html', html);
-  if (!url) return { count: notes.length, url: null, popupBlocked: true };
-  const win = window.open(`${url}&inline=1`, '_blank', 'noopener');
-  return { count: notes.length, url, popupBlocked: !win };
+  return exportPdfBackup(days, notes, lang, primary);
 }
