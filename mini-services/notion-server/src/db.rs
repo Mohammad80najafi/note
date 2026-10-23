@@ -126,7 +126,12 @@ pub fn blocks_of_page(con: &Connection, page_id: &str) -> Vec<Block> {
 }
 
 pub fn open_db(path: &str) -> Connection {
-    let con = Connection::open(path).expect("cannot open db");
+    // make sure the parent directory exists (fresh machines / custom NOTION_DB)
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let con = Connection::open(path)
+        .unwrap_or_else(|e| panic!("cannot open db at {path}: {e}"));
     con.pragma_update(None, "journal_mode", "WAL").ok();
     con.pragma_update(None, "foreign_keys", "ON").ok();
     con.execute_batch(

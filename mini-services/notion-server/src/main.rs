@@ -851,7 +851,8 @@ struct ExportBody {
 }
 
 fn exports_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from("/home/z/my-project/db/exports")
+    // portable: <project root>/db/exports, resolved from the crate location
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../db/exports")
 }
 
 /// Keep the exports dir tidy: drop files older than 24h, cap at 80 exports.
@@ -970,8 +971,14 @@ async fn serve_export(
 
 #[tokio::main]
 async fn main() {
-    let db_path = std::env::var("NOTION_DB")
-        .unwrap_or_else(|_| "/home/z/my-project/db/notion.db".to_string());
+    let db_path = std::env::var("NOTION_DB").unwrap_or_else(|_| {
+        // portable default: <project root>/db/notion.db (two levels above the
+        // crate), resolved on the compiling machine — works on Windows/macOS/Linux
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../db/notion.db")
+            .to_string_lossy()
+            .into_owned()
+    });
     let con = db::open_db(&db_path);
     let db: Db = Arc::new(Mutex::new(con));
 
