@@ -8,7 +8,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use db::{backup_from_row, blocks_of_page, get_block_row, get_page_row, now_ms, page_from_row, Backup, Block, Page};
+use db::{backup_from_row, block_from_row, blocks_of_page, get_block_row, get_page_row, now_ms, page_from_row, Backup, Block, Page};
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -493,6 +493,123 @@ async fn delete_backup(State(db): State<Db>, Path(id): Path<String>) -> Json<Val
     let con = db.lock().unwrap();
     con.execute("DELETE FROM backups WHERE id=?1", params![id]).unwrap();
     Json(json!({ "ok": true }))
+}
+
+// ---------------- cloud snapshot (GitHub sync) ----------------
+
+/// Full data dump for the cloud backup (GitHub sync).
+/// NOTE: `app_lock` is deliberately excluded — the site PIN never leaves the device.
+async fn snapshot(State(db): State<Db>) -> Json<Value> {
+    let con = db.lock().unwrap();
+    let pages: Vec<Page> = {
+        let mut stmt = con
+            .prepare("SELECT * FROM pages ORDER BY position, created_at")
+            .unwrap();
+        stmt.query_map([], page_from_row).unwrap().filter_map(|r| r.ok()).collect()
+    };
+    let blocks: Vec<Block> = {
+        let mut stmt = con
+            .prepare("SELECT * FROM blocks ORDER BY page_id, position, created_at")
+            .unwrap();
+        stmt.query_map([], block_from_row).unwrap().filter_map(|r| r.ok()).collect()
+    };
+    let backups: Vec<Backup> = {
+        let mut stmt = con
+            .prepare("SELECT * FROM backups ORDER BY created_at")
+            .unwrap();
+        stmt.query_map([], backup_from_row).unwrap().filter_map(|r| r.ok()).collect()
+    };
+    Json(json!({
+        "app": "notion-clone",
+        "version": 1,
+        "exportedAt": now_ms(),
+        "pageCount": pages.len(),
+        "blockCount": blocks.len(),
+        "pages": pages,
+        "blocks": blocks,
+        "backups": backups,
+    }))
+}
+
+#[derive(Deserialize)]
+struct SnapshotBody {
+    #[serde(default)]
+    pages: Vec<Page>,
+    #[serde(default)]
+    blocks: Vec<Block>,
+    #[serde(default)]
+    backups: Vec<Backup>,
+}
+
+/// Replace ALL local data with the snapshot pulled from the cloud (GitHub sync).
+/// Runs in one transaction; the site PIN (`app_lock`) is never touched.
+async fn restore_snapshot(State(db): State<Db>, Json(body): Json<SnapshotBody>) -> Response {
+    if body.pages.len() > 100_000 || body.blocks.len() > 1_000_000 || body.backups.len() > 50_000 {
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({"error":"snapshot too large"}))).into_response();
+    }
+    if body.pages.iter().any(|p| p.id.is_empty()) || body.blocks.iter().any(|b| b.id.is_empty()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"bad snapshot"}))).into_response();
+    }
+
+    let con = db.lock().unwrap();
+    let tx = match con.unchecked_transaction() {
+        Ok(t) => t,
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"tx failed"}))).into_response()
+        }
+    };
+    if tx.execute("DELETE FROM blocks", []).is_err()
+        || tx.execute("DELETE FROM pages", []).is_err()
+        || tx.execute("DELETE FROM backups", []).is_err()
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"clear failed"}))).into_response();
+    }
+    for p in &body.pages {
+        if tx
+            .execute(
+                "INSERT OR REPLACE INTO pages (id, parent_id, title, icon, cover, is_favorite, is_trashed, is_pinned, position, date, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![p.id, p.parent_id, p.title, p.icon, p.cover, p.is_favorite as i64, p.is_trashed as i64, p.is_pinned as i64, p.position, p.date, p.created_at, p.updated_at],
+            )
+            .is_err()
+        {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"page insert failed"}))).into_response();
+        }
+    }
+    for b in &body.blocks {
+        if tx
+            .execute(
+                "INSERT OR REPLACE INTO blocks (id, page_id, type, content, meta, checked, collapsed, indent, position, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![b.id, b.page_id, b.block_type, b.content, b.meta, b.checked as i64, b.collapsed as i64, b.indent, b.position, b.created_at, b.updated_at],
+            )
+            .is_err()
+        {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"block insert failed"}))).into_response();
+        }
+    }
+    for bk in &body.backups {
+        if tx
+            .execute(
+                "INSERT OR REPLACE INTO backups (id, days, start_date, end_date, format, page_count, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![bk.id, bk.days, bk.start_date, bk.end_date, bk.format, bk.page_count, bk.created_at],
+            )
+            .is_err()
+        {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"backup insert failed"}))).into_response();
+        }
+    }
+    if tx.commit().is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"commit failed"}))).into_response();
+    }
+    Json(json!({
+        "ok": true,
+        "pages": body.pages.len(),
+        "blocks": body.blocks.len(),
+        "backups": body.backups.len(),
+    }))
+    .into_response()
 }
 
 async fn purge_page(State(db): State<Db>, Path(id): Path<String>) -> Json<Value> {
@@ -1156,6 +1273,8 @@ async fn main() {
         .route("/api/lock/disable", post(lock_disable))
         .route("/api/export", post(create_export))
         .route("/api/export-zip", post(create_export_zip))
+        .route("/api/snapshot", get(snapshot))
+        .route("/api/snapshot/restore", post(restore_snapshot))
         .route("/api/export/{id}", get(serve_export))
         .fallback(static_fallback)
         .layer(axum::extract::DefaultBodyLimit::max(70 * 1024 * 1024))

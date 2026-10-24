@@ -70,6 +70,25 @@ export interface Crumb {
   icon: string | null;
 }
 
+/** Full workspace dump — what gets pushed to / pulled from GitHub. */
+export interface Snapshot {
+  app: string;
+  version: number;
+  exportedAt: number;
+  pageCount: number;
+  blockCount: number;
+  pages: Page[];
+  blocks: Block[];
+  backups: BackupRecord[];
+}
+
+export interface RestoreResult {
+  ok: boolean;
+  pages: number;
+  blocks: number;
+  backups: number;
+}
+
 export interface SearchResult {
   pageId: string;
   title: string;

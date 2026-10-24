@@ -1,4 +1,4 @@
-import type { BackupRecord, Block, BlockType, Crumb, LockStatus, Page, SearchResult } from './types';
+import type { BackupRecord, Block, BlockType, Crumb, LockStatus, Page, RestoreResult, Snapshot, SearchResult } from './types';
 
 // The gateway routes requests to the Rust (Axum) mini-service on port 3030
 const SVC = 'XTransformPort=3030';
@@ -98,6 +98,15 @@ export const api = {
   /** Upload a foldered backup manifest; the server zips it (one folder per day, one .md per note). */
   createZipExport: (b: { filename: string; files: { path: string; content: string }[] }) =>
     req<{ id: string; url: string }>('/api/export-zip', json('POST', b)),
+
+  /* ---- cloud snapshot (GitHub sync) ---- */
+
+  /** Full workspace dump (pages + blocks + backup history; the PIN is never included). */
+  getSnapshot: () => req<Snapshot>('/api/snapshot'),
+
+  /** Replace ALL local data with a snapshot pulled from the cloud. */
+  restoreSnapshot: (snap: { pages: unknown[]; blocks: unknown[]; backups: unknown[] }) =>
+    req<RestoreResult>('/api/snapshot/restore', json('POST', snap)),
 
   /* ---- site-wide lock ---- */
 

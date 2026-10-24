@@ -1,9 +1,9 @@
 use rusqlite::{params, Connection, Row};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Page {
     pub id: String,
@@ -23,7 +23,7 @@ pub struct Page {
 
 /// One backup session: the exact set of ISO days the user exported,
 /// the chosen format and how many notes were included.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Backup {
     pub id: String,
@@ -36,7 +36,7 @@ pub struct Backup {
     pub created_at: i64,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Block {
     pub id: String,

@@ -1006,6 +1006,72 @@ html, body {
 .bk-history-range { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 .bk-history-meta { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; }
 
+/* ---- GitHub cloud-sync tab inside the backup dialog ---- */
+
+.bk-tabs { display: flex; padding: 8px 18px 0; }
+.bk-tabs .bk-seg { flex: 1; }
+.bk-tabs .bk-seg-btn { flex: 1; justify-content: center; }
+
+.gh-panel { padding: 12px 18px 6px; display: flex; flex-direction: column; gap: 11px; }
+.gh-status { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-secondary); min-height: 18px; }
+.gh-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-tertiary); flex-shrink: 0; }
+.gh-dot.on { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent); }
+.gh-last { display: flex; gap: 16px; flex-wrap: wrap; font-size: 11.5px; color: var(--text-tertiary); }
+
+.gh-fields { display: flex; flex-direction: column; gap: 9px; }
+.gh-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.gh-row .gh-field { flex: 1; min-width: 110px; }
+.gh-field { display: flex; flex-direction: column; gap: 4px; }
+.gh-label { font-size: 11px; font-weight: 550; color: var(--text-tertiary); }
+.gh-inputwrap { position: relative; display: flex; }
+.gh-input {
+  width: 100%; box-sizing: border-box;
+  border: 1px solid var(--line); background: var(--hover);
+  border-radius: 6px; padding: 7px 30px 7px 9px;
+  font-family: inherit; font-size: 12.5px; color: var(--text);
+  direction: ltr; text-align: left;
+}
+.gh-input:focus { outline: none; border-color: var(--blue); background: var(--bg); }
+.gh-eye {
+  position: absolute; inset-inline-end: 6px; top: 50%; transform: translateY(-50%);
+  border: none; background: transparent; cursor: pointer;
+  color: var(--text-tertiary); padding: 2px; display: flex; border-radius: 4px;
+}
+.gh-eye:hover { color: var(--text); }
+
+.gh-btns { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.gh-btn {
+  border: 1px solid var(--line); cursor: pointer; font-family: inherit;
+  background: var(--bg); color: var(--text);
+  font-size: 13px; font-weight: 550;
+  padding: 7px 14px; border-radius: 7px;
+  display: inline-flex; align-items: center;
+  box-shadow: 0 1px 2px rgba(15, 15, 15, 0.06);
+}
+.gh-btn:hover:not(:disabled) { background: var(--hover); }
+.gh-btn:disabled { opacity: 0.4; cursor: default; }
+.gh-btn.danger {
+  border-color: color-mix(in srgb, var(--red) 45%, transparent);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 6%, var(--bg));
+}
+.gh-btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 12%, var(--bg)); }
+.gh-forget { color: var(--text-tertiary); }
+.gh-forget:hover { color: var(--red); }
+
+.gh-confirm {
+  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+  background: color-mix(in srgb, var(--red) 7%, transparent);
+  border-radius: 8px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.gh-confirm-text { font-size: 12.5px; color: var(--text); line-height: 1.8; }
+.gh-confirm-btns { display: flex; gap: 8px; align-items: center; }
+
+.gh-ok { background: color-mix(in srgb, var(--green) 10%, transparent); }
+.gh-link { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
+.gh-hint { font-size: 11px; color: var(--text-tertiary); line-height: 1.9; padding-bottom: 4px; }
+
 /* ================================================================
    Calendar additions — backup dots + chip pin
    ================================================================ */
